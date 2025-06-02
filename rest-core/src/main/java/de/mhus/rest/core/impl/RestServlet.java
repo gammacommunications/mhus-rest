@@ -682,16 +682,11 @@ public class RestServlet extends HttpServlet {
                 throw new Exception("Request exceeds the allowed payload limit. Allowed: " + MAX_PAYLOAD_BYTES +
                         " Actual count: " + contentLength);
 
-            byte[] payloadBuffer = new byte[contentLength];
+            byte[] payloadBuffer;
 
             try(InputStream inputStream = request.getInputStream()) {
-                inputStream.read(payloadBuffer);
+                payloadBuffer = inputStream.readAllBytes();
             }
-
-            boolean readAllData = request.getInputStream().isFinished();
-
-            if(!readAllData)
-                throw new Exception("Request contains more data than expected! Cancel.");
 
             //Parse request JSON string.
 
