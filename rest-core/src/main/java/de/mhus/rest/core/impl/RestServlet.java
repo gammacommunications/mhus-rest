@@ -18,12 +18,8 @@ package de.mhus.rest.core.impl;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintWriter;
-import java.util.Arrays;
-import java.util.Enumeration;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
 
 import javax.servlet.Servlet;
 import javax.servlet.ServletException;
@@ -81,6 +77,13 @@ import io.opentracing.tag.Tags;
  */
 @ServiceComponent(name = "RestServlet", service = Servlet.class, property = "alias=/rest/*")
 public class RestServlet extends HttpServlet {
+    private static final String MAGIC_JSON_HEADER_MAGIC_TRANSFORM_JSON_TO_PARAMETERS =
+            "X-Magic-Transform-Json-To-Parameters";
+
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
+    //Used to accept JSON data in the body payload of POST requests (see usage).
+    private static final int MAX_PAYLOAD_BYTES = 1024 * 1024 * 50;
 
     private static final String RESULT_TYPE_JSON = "json";
     private static final String RESULT_TYPE_HTTP = "http";
@@ -295,6 +298,27 @@ public class RestServlet extends HttpServlet {
         }
 
         Map<String, String[]> parameters = req.getParameterMap();
+
+        boolean isMagicJsonRequest = magicJsonIsJsonRequest(req);
+
+        if(isMagicJsonRequest) {
+            //The request contains flat JSON data. Parse JSON parameters and populate request data map.
+
+            //Wrap into a modifiable map.
+            parameters = new HashMap<>(req.getParameterMap());
+
+            boolean dataWasParsed = magicJsonFillParametersFromBodyJson(req, parameters);
+
+            if(!dataWasParsed) {
+                //Fail if there was a processing error. Don't send any sensitive(?) data to the client.
+
+                magicJsonOnError(req, resp, id, "Unable to parse JSON body payload. See log for " +
+                        "details.");
+
+                return null;
+            }
+        }
+
         // check for payload and overlay parameters
         // TODO implement payload
         //        String body = req.getReader().lines()
@@ -365,7 +389,6 @@ public class RestServlet extends HttpServlet {
                 restService.checkPermission(item, "read", callContext);
                 res = item.doRead(callContext);
             } else if (method.equals(MHttp.METHOD_POST)) {
-
                 if (callContext.hasAction()) {
                     restService.checkPermission(item, callContext.getAction(), callContext);
                     res = item.doAction(callContext);
@@ -641,5 +664,93 @@ public class RestServlet extends HttpServlet {
 
     public LinkedList<RestAuthenticator> getAuthenticators() {
         return authenticators;
+    }
+
+    private boolean magicJsonIsJsonRequest(HttpServletRequest request) {
+        //The getHeader function ignores the case of the header name.
+        return "POST".equalsIgnoreCase(request.getMethod()) &&
+                request.getHeader(MAGIC_JSON_HEADER_MAGIC_TRANSFORM_JSON_TO_PARAMETERS) != null;
+    }
+
+    private boolean magicJsonFillParametersFromBodyJson(HttpServletRequest request, Map<String, String[]> requestParameterMap) {
+        try {
+            //Parse request bytes.
+
+            int contentLength = request.getContentLength();
+
+            if(contentLength > MAX_PAYLOAD_BYTES)
+                throw new Exception("Request exceeds the allowed payload limit. Allowed: " + MAX_PAYLOAD_BYTES +
+                        " Actual count: " + contentLength);
+
+            byte[] payloadBuffer = new byte[contentLength];
+
+            try(InputStream inputStream = request.getInputStream()) {
+                inputStream.read(payloadBuffer);
+            }
+
+            boolean readAllData = request.getInputStream().isFinished();
+
+            if(!readAllData)
+                throw new Exception("Request contains more data than expected! Cancel.");
+
+            //Parse request JSON string.
+
+            Map<String, String> keyValuesMap;
+
+            try {
+                String jsonString = new String(payloadBuffer, StandardCharsets.UTF_8);
+
+                keyValuesMap = OBJECT_MAPPER.readValue(jsonString, Map.class);
+            }
+            catch(Exception exception) {
+                throw new Exception("Unable to parse JSON string as flat map.");
+            }
+
+            //Populate the given key-values map.
+
+            keyValuesMap.forEach((key, value) -> {
+                //Check if there is already an existing array.
+                String[] targetArray = requestParameterMap.get(key);
+
+                boolean valueAlreadyExists = false;
+
+                if(targetArray != null) {
+                    valueAlreadyExists = Arrays.asList(targetArray).contains(value);
+                }
+
+                if(targetArray == null) {
+                    //The is no array. We create a new one.
+
+                    targetArray = new String[1];
+                    targetArray[0] = value;
+
+                    requestParameterMap.put(key, targetArray);
+                }
+                else if(!valueAlreadyExists) {
+                    //There is an array! Add a single entry, but only if it is absent.
+
+                    List<String> entries = new ArrayList<>(Arrays.asList(targetArray));
+                    entries.add(value);
+
+                    targetArray = entries.toArray(new String[0]);
+
+                    requestParameterMap.put(key, targetArray);
+                }
+            });
+        }
+        catch(Exception exception) {
+            log.e("Unable to parse JSON payload from body.", exception);
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private void magicJsonOnError(HttpServletRequest req, HttpServletResponse resp, long id, String message) throws IOException {
+        resp.setHeader("WWW-Authenticate", "BASIC realm=\"rest\"");
+
+        sendError(id, req, resp, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, message, null, null,
+                null);
     }
 }
