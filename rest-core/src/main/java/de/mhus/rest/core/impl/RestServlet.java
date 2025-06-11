@@ -27,6 +27,8 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import com.fasterxml.jackson.databind.node.JsonNodeType;
+import de.mhus.lib.errors.NotSupportedException;
 import org.apache.shiro.SecurityUtils;
 import org.apache.shiro.authc.AuthenticationException;
 import org.apache.shiro.authc.AuthenticationToken;
@@ -695,10 +697,11 @@ public class RestServlet extends HttpServlet {
             try {
                 String jsonString = new String(payloadBuffer, StandardCharsets.UTF_8);
 
-                keyValuesMap = OBJECT_MAPPER.readValue(jsonString, Map.class);
+                JsonNode node = OBJECT_MAPPER.readTree(jsonString);
+                keyValuesMap = extractPrimitives(node);
             }
             catch(Exception exception) {
-                throw new Exception("Unable to parse JSON string as flat map.");
+                throw new Exception("Unable to parse JSON string as flat map", exception);
             }
 
             //Populate the given key-values map.
@@ -709,19 +712,18 @@ public class RestServlet extends HttpServlet {
 
                 boolean valueAlreadyExists = false;
 
-                if(targetArray != null) {
+                if (targetArray != null) {
                     valueAlreadyExists = Arrays.asList(targetArray).contains(value);
                 }
 
-                if(targetArray == null) {
+                if (targetArray == null) {
                     //The is no array. We create a new one.
 
                     targetArray = new String[1];
                     targetArray[0] = value;
 
                     requestParameterMap.put(key, targetArray);
-                }
-                else if(!valueAlreadyExists) {
+                } else if (!valueAlreadyExists) {
                     //There is an array! Add a single entry, but only if it is absent.
 
                     List<String> entries = new ArrayList<>(Arrays.asList(targetArray));
@@ -734,12 +736,42 @@ public class RestServlet extends HttpServlet {
             });
         }
         catch(Exception exception) {
-            log.e("Unable to parse JSON payload from body.", exception);
+            log.e("Unable to parse JSON payload from body", exception);
 
             return false;
         }
 
         return true;
+    }
+
+    public static Map<String, String> extractPrimitives(JsonNode jsonNode) throws Exception {
+        Map<String, String> result = new HashMap<>();
+
+        if (jsonNode.isObject()) {
+            Iterator<Map.Entry<String, JsonNode>> fields = jsonNode.fields();
+
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+
+                JsonNode value = entry.getValue();
+                JsonNodeType type = value.getNodeType();
+
+                //Only store primitive types (STRING, NUMBER, BOOLEAN, NULL)
+                if (type == JsonNodeType.STRING ||
+                        type == JsonNodeType.NUMBER ||
+                        type == JsonNodeType.BOOLEAN ||
+                        type == JsonNodeType.NULL) {
+
+                    result.put(entry.getKey(), value.asText());
+                } else {
+                    throw new Exception("given json format not supported, not a primitive type");
+                }
+            }
+        } else {
+            throw new Exception("given json format not supported, not a json object");
+        }
+
+        return result;
     }
 
     private void magicJsonOnError(HttpServletRequest req, HttpServletResponse resp, long id, String message) throws IOException {
